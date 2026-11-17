@@ -3,7 +3,6 @@ package com.example.lab13.screens
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -18,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -62,6 +62,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 private enum class GamePhase { Menu, Playing, GameOver }
@@ -77,6 +78,10 @@ private data class FallingObject(
 
 private data class Star(val x: Float, val y: Float, val alpha: Float, val size: Float)
 
+private const val SHIP_Y_FRACTION = 0.83f
+private const val OBSTACLE_RADIUS_BASE = 14f
+private const val ENERGY_ORB_RADIUS_BASE = 12f
+
 @Composable
 fun FinalExerciseScreen() {
     var gamePhase by remember { mutableStateOf(GamePhase.Menu) }
@@ -88,6 +93,8 @@ fun FinalExerciseScreen() {
     var showDamage by remember { mutableStateOf(false) }
     var showEnergy by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
+    var arenaWidthPx by remember { mutableFloatStateOf(1f) }
+    var arenaHeightPx by remember { mutableFloatStateOf(1f) }
     val stars = remember {
         List(60) {
             Star(
@@ -122,6 +129,8 @@ fun FinalExerciseScreen() {
             )
 
             GamePhase.Playing -> {
+                val density = LocalDensity.current
+
                 // animateColorAsState: subtle ship glow on damage/energy
                 val shipGlow by animateColorAsState(
                     targetValue = when {
@@ -174,9 +183,23 @@ fun FinalExerciseScreen() {
                         obstacles.clear()
                         obstacles.addAll(updated)
 
+                        val shipCenterXPx = shipX * arenaWidthPx
+                        val shipCenterYPx = SHIP_Y_FRACTION * arenaHeightPx
+                        val shipRadiusPx = with(density) { shipSize.toPx() / 2f }
+
                         val toRemove = mutableListOf<Int>()
                         for (obs in obstacles) {
-                            if (obs.y > 0.78f && obs.y < 0.88f && abs(obs.x - shipX) < 0.08f) {
+                            val obsCenterXPx = obs.x * arenaWidthPx
+                            val obsCenterYPx = obs.y * arenaHeightPx
+                            val obsRadiusPx = if (obs.isEnergy) {
+                                ENERGY_ORB_RADIUS_BASE * obs.sizeVariant
+                            } else {
+                                OBSTACLE_RADIUS_BASE * obs.sizeVariant
+                            }
+                            val dx = obsCenterXPx - shipCenterXPx
+                            val dy = obsCenterYPx - shipCenterYPx
+                            val dist = sqrt(dx * dx + dy * dy)
+                            if (dist < shipRadiusPx + obsRadiusPx) {
                                 toRemove.add(obs.id)
                                 if (obs.isEnergy) {
                                     score += 10
@@ -218,7 +241,11 @@ fun FinalExerciseScreen() {
                     score = score,
                     lives = lives,
                     showDamage = showDamage,
-                    onDrag = { delta -> shipX = (shipX + delta).coerceIn(0.06f, 0.94f) }
+                    onDrag = { delta -> shipX = (shipX + delta).coerceIn(0.06f, 0.94f) },
+                    onArenaSize = { w, h ->
+                        arenaWidthPx = w
+                        arenaHeightPx = h
+                    }
                 )
             }
 
@@ -309,23 +336,34 @@ private fun GameArena(
     score: Int,
     lives: Int,
     showDamage: Boolean,
-    onDrag: (Float) -> Unit
+    onDrag: (Float) -> Unit,
+    onArenaSize: (Float, Float) -> Unit
 ) {
     val density = LocalDensity.current
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0A0E1A))
             .pointerInput(Unit) {
                 detectDragGestures { _, dragAmount ->
-                    onDrag(dragAmount.x / size.width)
+                    onDrag(dragAmount.x / size.width.toFloat())
                 }
             }
     ) {
+        val arenaWidthPx = with(density) { maxWidth.toPx() }
+        val arenaHeightPx = with(density) { maxHeight.toPx() }
+
+        LaunchedEffect(arenaWidthPx, arenaHeightPx) {
+            onArenaSize(arenaWidthPx, arenaHeightPx)
+        }
+
+        val shipSizePx = with(density) { shipSize.toPx() }
+        val shipCenterXPx = shipX * arenaWidthPx
+        val shipCenterYPx = SHIP_Y_FRACTION * arenaHeightPx
+
         // Star background + obstacles drawn on canvas
         Canvas(modifier = Modifier.fillMaxSize()) {
-            // Stars
             for (star in stars) {
                 val flicker = (sin((tick * 0.05f + star.x * 10f).toDouble()) * 0.3f + 0.7f).toFloat()
                 drawCircle(
@@ -335,7 +373,6 @@ private fun GameArena(
                 )
             }
 
-            // Obstacles
             for (obs in obstacles) {
                 val cx = obs.x * size.width
                 val cy = obs.y * size.height
@@ -346,9 +383,6 @@ private fun GameArena(
                 }
             }
 
-            // Ship glow (subtle border glow instead of full-screen tint)
-            val sx = shipX * size.width
-            val sy = size.height * 0.83f
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
@@ -356,11 +390,11 @@ private fun GameArena(
                         shipGlow.copy(alpha = shipGlowAlpha * 0.3f),
                         Color.Transparent
                     ),
-                    center = Offset(sx, sy),
-                    radius = 60f
+                    center = Offset(shipCenterXPx, shipCenterYPx),
+                    radius = shipSizePx * 1.3f
                 ),
-                radius = 60f,
-                center = Offset(sx, sy)
+                radius = shipSizePx * 1.3f,
+                center = Offset(shipCenterXPx, shipCenterYPx)
             )
         }
 
@@ -384,13 +418,13 @@ private fun GameArena(
             )
         }
 
-        // Ship composable (for animateDpAsState size)
+        // Ship composable (centered on shipCenterX, shipCenterY)
         Box(
             modifier = Modifier
                 .offset {
                     IntOffset(
-                        (shipX * 1000 - with(density) { shipSize.toPx() / 2 }).roundToInt(),
-                        (830 - with(density) { shipSize.toPx() / 2 }).roundToInt()
+                        (shipCenterXPx - shipSizePx / 2f).roundToInt(),
+                        (shipCenterYPx - shipSizePx / 2f).roundToInt()
                     )
                 }
                 .size(shipSize),
