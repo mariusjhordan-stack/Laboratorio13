@@ -3,7 +3,9 @@ package com.example.lab13.screens
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -11,22 +13,24 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -40,7 +44,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -50,209 +59,256 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.random.Random
 
-enum class GameState { Menu, Playing, GameOver }
+private enum class GamePhase { Menu, Playing, GameOver }
 
-data class Obstacle(val x: Float, val y: Float, val id: Int, val isEnergy: Boolean = false)
+private data class FallingObject(
+    val x: Float,
+    val y: Float,
+    val id: Int,
+    val isEnergy: Boolean = false,
+    val rotation: Float = 0f,
+    val sizeVariant: Float = 1f
+)
+
+private data class Star(val x: Float, val y: Float, val alpha: Float, val size: Float)
 
 @Composable
 fun FinalExerciseScreen() {
-    var gameState by remember { mutableStateOf(GameState.Menu) }
+    var gamePhase by remember { mutableStateOf(GamePhase.Menu) }
     var score by remember { mutableIntStateOf(0) }
     var lives by remember { mutableIntStateOf(3) }
-    var shipX by remember { mutableFloatStateOf(180f) }
-    val obstacles = remember { mutableStateListOf<Obstacle>() }
-    var obstacleIdCounter by remember { mutableIntStateOf(0) }
-    var showDamageFlash by remember { mutableStateOf(false) }
-    var showEnergyCollect by remember { mutableStateOf(false) }
-    var frameCount by remember { mutableIntStateOf(0) }
+    var shipX by remember { mutableFloatStateOf(0.5f) }
+    val obstacles = remember { mutableStateListOf<FallingObject>() }
+    var idCounter by remember { mutableIntStateOf(0) }
+    var showDamage by remember { mutableStateOf(false) }
+    var showEnergy by remember { mutableStateOf(false) }
+    var tick by remember { mutableIntStateOf(0) }
+    val stars = remember {
+        List(60) {
+            Star(
+                x = Random.nextFloat(),
+                y = Random.nextFloat(),
+                alpha = Random.nextFloat() * 0.6f + 0.2f,
+                size = Random.nextFloat() * 2f + 0.5f
+            )
+        }
+    }
 
-    // AnimatedContent: transitions between Menu, Playing, GameOver
+    // AnimatedContent: Menu / Playing / GameOver
     AnimatedContent(
-        targetState = gameState,
+        targetState = gamePhase,
         transitionSpec = {
             fadeIn(tween(400)) togetherWith fadeOut(tween(200))
         },
-        label = "gameStateTransition"
-    ) { state ->
-        when (state) {
-            GameState.Menu -> MenuScreen(
+        label = "gamePhaseTransition"
+    ) { phase ->
+        when (phase) {
+            GamePhase.Menu -> SpaceMenu(
+                stars = stars,
                 onStart = {
                     score = 0
                     lives = 3
-                    shipX = 180f
+                    shipX = 0.5f
                     obstacles.clear()
-                    obstacleIdCounter = 0
-                    frameCount = 0
-                    gameState = GameState.Playing
+                    idCounter = 0
+                    tick = 0
+                    gamePhase = GamePhase.Playing
                 }
             )
-            GameState.Playing -> {
-                // animateColorAsState: flash red on damage, green on energy pickup
-                val bgColor by animateColorAsState(
+
+            GamePhase.Playing -> {
+                // animateColorAsState: subtle ship glow on damage/energy
+                val shipGlow by animateColorAsState(
                     targetValue = when {
-                        showDamageFlash -> Color(0x33FF0000)
-                        showEnergyCollect -> Color(0x3300FF00)
-                        else -> Color(0xFF0D1B2A)
+                        showDamage -> Color(0xFFFF6E40)
+                        showEnergy -> Color(0xFF64FFDA)
+                        else -> Color(0xFF448AFF)
                     },
-                    animationSpec = tween(300),
-                    label = "bgFlash"
+                    animationSpec = tween(250),
+                    label = "shipGlow"
                 )
 
-                // animateDpAsState: ship size pulses when collecting energy
+                val shipGlowAlpha by animateFloatAsState(
+                    targetValue = if (showDamage || showEnergy) 0.7f else 0.3f,
+                    animationSpec = tween(250),
+                    label = "glowAlpha"
+                )
+
+                // animateDpAsState: ship pulses on energy collect
                 val shipSize by animateDpAsState(
-                    targetValue = if (showEnergyCollect) 52.dp else 44.dp,
+                    targetValue = if (showEnergy) 54.dp else 46.dp,
                     animationSpec = spring(),
-                    label = "shipSize"
+                    label = "shipPulse"
                 )
 
                 LaunchedEffect(Unit) {
-                    while (gameState == GameState.Playing) {
+                    while (gamePhase == GamePhase.Playing) {
                         delay(50L)
-                        frameCount++
+                        tick++
 
-                        // Spawn obstacles every 15 frames
-                        if (frameCount % 15 == 0) {
-                            val isEnergy = Random.nextFloat() < 0.25f
+                        if (tick % 12 == 0) {
+                            val isE = Random.nextFloat() < 0.22f
                             obstacles.add(
-                                Obstacle(
-                                    x = Random.nextFloat() * 340f,
-                                    y = -30f,
-                                    id = obstacleIdCounter++,
-                                    isEnergy = isEnergy
+                                FallingObject(
+                                    x = Random.nextFloat() * 0.9f + 0.05f,
+                                    y = -0.05f,
+                                    id = idCounter++,
+                                    isEnergy = isE,
+                                    rotation = Random.nextFloat() * 360f,
+                                    sizeVariant = Random.nextFloat() * 0.4f + 0.8f
                                 )
                             )
                         }
 
-                        // Move obstacles down
-                        val updated = obstacles.map { it.copy(y = it.y + 6f) }
+                        val updated = obstacles.map {
+                            it.copy(
+                                y = it.y + 0.012f,
+                                rotation = it.rotation + if (it.isEnergy) 3f else 2f
+                            )
+                        }
                         obstacles.clear()
                         obstacles.addAll(updated)
 
-                        // Check collisions
-                        val shipLeft = shipX - 22f
-                        val shipRight = shipX + 22f
-                        val shipTop = 520f
-
                         val toRemove = mutableListOf<Int>()
                         for (obs in obstacles) {
-                            if (obs.y > shipTop - 20f && obs.y < shipTop + 44f &&
-                                abs(obs.x - shipX) < 40f
-                            ) {
+                            if (obs.y > 0.78f && obs.y < 0.88f && abs(obs.x - shipX) < 0.08f) {
                                 toRemove.add(obs.id)
                                 if (obs.isEnergy) {
                                     score += 10
-                                    showEnergyCollect = true
+                                    showEnergy = true
                                 } else {
                                     lives--
-                                    showDamageFlash = true
+                                    showDamage = true
                                 }
                             }
                         }
                         obstacles.removeAll { it.id in toRemove }
+                        obstacles.removeAll { it.y > 1.1f }
 
-                        // Remove off-screen
-                        obstacles.removeAll { it.y > 650f }
+                        if (tick % 20 == 0) score++
 
-                        // Score for surviving
-                        if (frameCount % 20 == 0) score++
-
-                        // Reset flashes
-                        if (showDamageFlash) {
-                            delay(200)
-                            showDamageFlash = false
+                        if (showDamage) {
+                            delay(250)
+                            showDamage = false
                         }
-                        if (showEnergyCollect) {
-                            delay(200)
-                            showEnergyCollect = false
+                        if (showEnergy) {
+                            delay(250)
+                            showEnergy = false
                         }
 
                         if (lives <= 0) {
-                            gameState = GameState.GameOver
+                            gamePhase = GamePhase.GameOver
                         }
                     }
                 }
 
-                GamePlayScreen(
-                    bgColor = bgColor,
+                GameArena(
+                    stars = stars,
+                    tick = tick,
                     shipX = shipX,
                     shipSize = shipSize,
+                    shipGlow = shipGlow,
+                    shipGlowAlpha = shipGlowAlpha,
                     obstacles = obstacles,
                     score = score,
                     lives = lives,
-                    showDamageFlash = showDamageFlash,
-                    onDrag = { delta ->
-                        shipX = (shipX + delta).coerceIn(22f, 358f)
-                    }
+                    showDamage = showDamage,
+                    onDrag = { delta -> shipX = (shipX + delta).coerceIn(0.06f, 0.94f) }
                 )
             }
-            GameState.GameOver -> GameOverScreen(
+
+            GamePhase.GameOver -> SpaceGameOver(
+                stars = stars,
                 score = score,
                 onRestart = {
                     score = 0
                     lives = 3
-                    shipX = 180f
+                    shipX = 0.5f
                     obstacles.clear()
-                    obstacleIdCounter = 0
-                    frameCount = 0
-                    gameState = GameState.Playing
+                    idCounter = 0
+                    tick = 0
+                    gamePhase = GamePhase.Playing
                 },
-                onMenu = { gameState = GameState.Menu }
+                onMenu = { gamePhase = GamePhase.Menu }
             )
         }
     }
 }
 
 @Composable
-private fun MenuScreen(onStart: () -> Unit) {
+private fun StarField(stars: List<Star>, tick: Int = 0) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        for (star in stars) {
+            val flicker = (sin((tick * 0.05f + star.x * 10f).toDouble()) * 0.3f + 0.7f).toFloat()
+            drawCircle(
+                color = Color.White.copy(alpha = star.alpha * flicker),
+                radius = star.size,
+                center = Offset(star.x * size.width, star.y * size.height)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SpaceMenu(stars: List<Star>, onStart: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0D1B2A)),
+            .background(Color(0xFF0A0E1A)),
         contentAlignment = Alignment.Center
     ) {
+        StarField(stars)
+
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                "🚀",
-                fontSize = 64.sp
-            )
+            Text("🚀", fontSize = 72.sp)
+            Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = "ESCAPE ESPACIAL",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
                 color = Color(0xFF64FFDA),
-                modifier = Modifier.padding(top = 16.dp)
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Esquiva meteoritos ☄️ · Atrapa energía ⚡",
+                color = Color(0xFF8899BB),
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center
             )
             Text(
-                text = "Esquiva meteoritos ☄️\nAtrapa energía ⚡",
-                style = MaterialTheme.typography.bodyLarge,
-                color = Color(0xFFB0BEC5),
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(top = 12.dp, bottom = 32.dp)
+                text = "Desliza para mover la nave",
+                color = Color(0xFF667799),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp)
             )
+            Spacer(modifier = Modifier.height(40.dp))
             Button(
                 onClick = onStart,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF64FFDA)
-                )
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF64FFDA))
             ) {
-                Text("JUGAR", color = Color(0xFF0D1B2A), fontWeight = FontWeight.Bold)
+                Text("JUGAR", color = Color(0xFF0A0E1A), fontWeight = FontWeight.Bold, fontSize = 18.sp)
             }
         }
     }
 }
 
 @Composable
-private fun GamePlayScreen(
-    bgColor: Color,
+private fun GameArena(
+    stars: List<Star>,
+    tick: Int,
     shipX: Float,
     shipSize: androidx.compose.ui.unit.Dp,
-    obstacles: List<Obstacle>,
+    shipGlow: Color,
+    shipGlowAlpha: Float,
+    obstacles: List<FallingObject>,
     score: Int,
     lives: Int,
-    showDamageFlash: Boolean,
+    showDamage: Boolean,
     onDrag: (Float) -> Unit
 ) {
     val density = LocalDensity.current
@@ -260,18 +316,60 @@ private fun GamePlayScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(bgColor)
+            .background(Color(0xFF0A0E1A))
             .pointerInput(Unit) {
                 detectDragGestures { _, dragAmount ->
-                    onDrag(dragAmount.x)
+                    onDrag(dragAmount.x / size.width)
                 }
             }
     ) {
-        // HUD
+        // Star background + obstacles drawn on canvas
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            // Stars
+            for (star in stars) {
+                val flicker = (sin((tick * 0.05f + star.x * 10f).toDouble()) * 0.3f + 0.7f).toFloat()
+                drawCircle(
+                    color = Color.White.copy(alpha = star.alpha * flicker),
+                    radius = star.size,
+                    center = Offset(star.x * size.width, star.y * size.height)
+                )
+            }
+
+            // Obstacles
+            for (obs in obstacles) {
+                val cx = obs.x * size.width
+                val cy = obs.y * size.height
+                if (obs.isEnergy) {
+                    drawEnergyOrb(cx, cy, obs.rotation, obs.sizeVariant)
+                } else {
+                    drawMeteor(cx, cy, obs.rotation, obs.sizeVariant)
+                }
+            }
+
+            // Ship glow (subtle border glow instead of full-screen tint)
+            val sx = shipX * size.width
+            val sy = size.height * 0.83f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        shipGlow.copy(alpha = shipGlowAlpha),
+                        shipGlow.copy(alpha = shipGlowAlpha * 0.3f),
+                        Color.Transparent
+                    ),
+                    center = Offset(sx, sy),
+                    radius = 60f
+                ),
+                radius = 60f,
+                center = Offset(sx, sy)
+            )
+        }
+
+        // HUD with statusBarsPadding
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .statusBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
@@ -286,79 +384,127 @@ private fun GamePlayScreen(
             )
         }
 
-        // Obstacles (animateDpAsState + offset for movement)
-        obstacles.forEach { obs ->
-            val obsOffsetY by animateDpAsState(
-                targetValue = with(density) { obs.y.toDp() },
-                animationSpec = tween(50),
-                label = "obsY${obs.id}"
-            )
-            Box(
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            obs.x.roundToInt(),
-                            obsOffsetY.roundToPx()
-                        )
-                    }
-                    .size(if (obs.isEnergy) 28.dp else 24.dp)
-                    .clip(if (obs.isEnergy) CircleShape else RoundedCornerShape(4.dp))
-                    .background(if (obs.isEnergy) Color(0xFF64FFDA) else Color(0xFFFF6E40))
-            )
-        }
-
-        // Ship
+        // Ship composable (for animateDpAsState size)
         Box(
             modifier = Modifier
                 .offset {
                     IntOffset(
-                        (shipX - with(density) { shipSize.toPx() / 2 }).roundToInt(),
-                        with(density) { 520.dp.roundToPx() }
+                        (shipX * 1000 - with(density) { shipSize.toPx() / 2 }).roundToInt(),
+                        (830 - with(density) { shipSize.toPx() / 2 }).roundToInt()
                     )
                 }
-                .size(shipSize)
-                .clip(CircleShape)
-                .background(Color(0xFF64FFDA)),
+                .size(shipSize),
             contentAlignment = Alignment.Center
         ) {
-            Text("🚀", fontSize = 24.sp)
+            Text("🚀", fontSize = 28.sp)
         }
 
-        // AnimatedVisibility: damage warning
+        // AnimatedVisibility: damage warning popup
         AnimatedVisibility(
-            visible = showDamageFlash,
+            visible = showDamage,
             enter = fadeIn() + expandVertically(),
             exit = fadeOut() + shrinkVertically(),
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 60.dp)
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 48.dp)
         ) {
             Text(
-                text = "¡DAÑO!",
-                color = Color.Red,
+                text = "⚠️ ¡DAÑO!",
+                color = Color(0xFFFF6E40),
                 fontWeight = FontWeight.Bold,
-                fontSize = 28.sp,
+                fontSize = 22.sp,
                 modifier = Modifier
-                    .background(
-                        Color(0x88000000),
-                        RoundedCornerShape(8.dp)
-                    )
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xCC1A1A2E))
                     .padding(horizontal = 24.dp, vertical = 8.dp)
             )
         }
     }
 }
 
+private fun DrawScope.drawMeteor(cx: Float, cy: Float, rotation: Float, scale: Float) {
+    val baseRadius = 14f * scale
+    rotate(rotation, pivot = Offset(cx, cy)) {
+        val path = Path().apply {
+            moveTo(cx, cy - baseRadius * 1.1f)
+            lineTo(cx + baseRadius * 0.7f, cy - baseRadius * 0.5f)
+            lineTo(cx + baseRadius * 1.0f, cy + baseRadius * 0.2f)
+            lineTo(cx + baseRadius * 0.5f, cy + baseRadius * 0.9f)
+            lineTo(cx - baseRadius * 0.3f, cy + baseRadius * 1.0f)
+            lineTo(cx - baseRadius * 0.9f, cy + baseRadius * 0.4f)
+            lineTo(cx - baseRadius * 0.8f, cy - baseRadius * 0.3f)
+            close()
+        }
+        drawPath(path, Color(0xFF8D6E63))
+        drawPath(path, Brush.radialGradient(
+            colors = listOf(Color(0xFFBCAAA4), Color(0xFF5D4037)),
+            center = Offset(cx - baseRadius * 0.2f, cy - baseRadius * 0.2f),
+            radius = baseRadius * 1.5f
+        ))
+        drawCircle(Color(0xFF4E342E), radius = baseRadius * 0.2f, center = Offset(cx + baseRadius * 0.3f, cy))
+        drawCircle(Color(0xFF4E342E), radius = baseRadius * 0.12f, center = Offset(cx - baseRadius * 0.2f, cy + baseRadius * 0.4f))
+    }
+}
+
+private fun DrawScope.drawEnergyOrb(cx: Float, cy: Float, rotation: Float, scale: Float) {
+    val r = 12f * scale
+    drawCircle(
+        brush = Brush.radialGradient(
+            colors = listOf(
+                Color(0xFF64FFDA),
+                Color(0xFF00BFA5).copy(alpha = 0.6f),
+                Color.Transparent
+            ),
+            center = Offset(cx, cy),
+            radius = r * 2.5f
+        ),
+        radius = r * 2.5f,
+        center = Offset(cx, cy)
+    )
+    drawCircle(
+        brush = Brush.radialGradient(
+            colors = listOf(Color.White, Color(0xFF64FFDA)),
+            center = Offset(cx, cy),
+            radius = r
+        ),
+        radius = r,
+        center = Offset(cx, cy)
+    )
+    val angle = Math.toRadians(rotation.toDouble())
+    val sparkDist = r * 1.6f
+    for (i in 0 until 4) {
+        val a = angle + i * Math.PI / 2
+        drawCircle(
+            color = Color(0xFF64FFDA).copy(alpha = 0.6f),
+            radius = 2.5f,
+            center = Offset(
+                cx + (cos(a) * sparkDist).toFloat(),
+                cy + (sin(a) * sparkDist).toFloat()
+            )
+        )
+    }
+}
+
 @Composable
-private fun GameOverScreen(score: Int, onRestart: () -> Unit, onMenu: () -> Unit) {
-    // AnimatedVisibility for the game over panel appearing
+private fun SpaceGameOver(
+    stars: List<Star>,
+    score: Int,
+    onRestart: () -> Unit,
+    onMenu: () -> Unit
+) {
     var showPanel by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { showPanel = true }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0D1B2A)),
+            .background(Color(0xFF0A0E1A)),
         contentAlignment = Alignment.Center
     ) {
+        StarField(stars)
+
+        // AnimatedVisibility: game over panel
         AnimatedVisibility(
             visible = showPanel,
             enter = fadeIn(tween(600)) + expandVertically(tween(400)),
@@ -366,33 +512,38 @@ private fun GameOverScreen(score: Int, onRestart: () -> Unit, onMenu: () -> Unit
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("💥", fontSize = 64.sp)
+                Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "GAME OVER",
-                    style = MaterialTheme.typography.headlineLarge,
-                    fontWeight = FontWeight.Bold,
                     color = Color(0xFFFF6E40),
-                    modifier = Modifier.padding(top = 16.dp)
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold
                 )
-                Text(
-                    text = "Puntaje: $score",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = Color(0xFFFFD54F),
-                    modifier = Modifier.padding(top = 12.dp, bottom = 32.dp)
-                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFF1A2A3A))
+                        .padding(horizontal = 24.dp, vertical = 12.dp)
+                ) {
+                    Text(
+                        text = "⭐ $score pts",
+                        color = Color(0xFFFFD54F),
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(32.dp))
                 Button(
                     onClick = onRestart,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF64FFDA)
-                    ),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF64FFDA)),
                     modifier = Modifier.padding(bottom = 12.dp)
                 ) {
-                    Text("REINTENTAR", color = Color(0xFF0D1B2A), fontWeight = FontWeight.Bold)
+                    Text("REINTENTAR", color = Color(0xFF0A0E1A), fontWeight = FontWeight.Bold)
                 }
                 Button(
                     onClick = onMenu,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF455A64)
-                    )
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A3A4A))
                 ) {
                     Text("MENÚ", color = Color.White)
                 }
